@@ -1,0 +1,665 @@
+---
+title: "ALRF Weather Stn Report"
+author: "C. Chisholm"
+date: "Report Generated: `r Sys.Date()`"
+output:
+  html_document:
+    collapsed: no
+    number_sections: no
+    smooth_scroll: no
+    toc: no
+    toc_depth: 4
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '4'
+# subtitle: "Statistical Analysis"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warnings = FALSE, message = FALSE)
+options(warn = 1)
+```
+
+
+<!-- <div style = "background-color: yellow; border: solid 3px red; padding: 8pt"> -->
+<!-- # FWI Hack -- _Fire season has not started _ -->
+<!-- The fire season starts when there have been 3 consecutive days with a max air tempurature of 12^o^C.   -->
+```{r, echo=FALSE}
+## Hack -- FWI is not calculated properly
+fsSTART <-12 ## change this to 12 for proper calculaion of the script
+fsEND  <-  5  ## change this to  5
+```
+
+<!-- </div>   -->
+
+```{r, include = FALSE}
+### Libraries 
+
+library(knitr)      ## Pretty Outputs 
+# library(zoo)        ## Managing time stamps
+                    ## See: https://www.r-bloggers.com/how-to-calculate-with-dates-and-hours-in-r/
+# library(tidyverse)  ## Data manipulation 
+# library(lubridate)  ## functions to extract time components 
+```
+
+
+
+```{r, include=FALSE}
+## IMPORT AND PROCESS DATA FOR USE WITH cffdrs
+
+library(cffdrs)
+library(tidyverse)
+library(lubridate)
+## Format for the data table 
+   #    id   lat  long    yr   mon   day  temp    rh    ws  prec  tmax
+   # <int> <dbl> <dbl> <int> <int> <int> <dbl> <dbl> <dbl> <dbl> <dbl>
+  
+## Import the .dat file from the weather station 
+# dataFile <- "G:\\My Drive\\ALRF_DATA\\ALRF_autodata.dat"
+  dataFile <- "./rawData/ALRF_autodata.dat"
+
+readWeather <- function(){
+  
+  hNames <- scan(dataFile, what = character(), sep = ",",
+            skip = 1, nlines = 1)
+  raw <- read.table(dataFile, header = FALSE, 
+                  sep = ",", skip = 4 )
+  names(raw) <- hNames 
+  rm(hNames)  ## Var Not needed 
+  return(raw)
+}
+raw <- readWeather()
+
+
+fw_dat <- raw %>% as_tibble() %>%
+  mutate(id = 1,
+         lat = 54.086, 
+         long = 122.076,
+         TIME = as.POSIXct(TIMESTAMP),
+         intTime = as.integer(TIME),
+         yr   = year(TIME),
+         mon  = month(TIME),
+         day  = day(TIME),
+         HR   = hour(TIME),
+         MIN  = minute(TIME),
+         SEC  = second(TIME),
+         TEMP = AirTC_Avg,
+         rh   = RH,
+         ws   = max(c(WS_ms_Avg, WS_ms_2_Avg)),
+         RAIN = Rain_mm_Tot) %>% 
+  dplyr::select(id, lat, long, TIME, intTime, yr, mon, day, HR, MIN, SEC, TEMP, rh, ws, RAIN) 
+
+## Filter to Noon time and values at noon
+fw2_noon <- fw_dat %>% 
+  filter(HR == 13 & MIN == 0)  %>%  ## as per Wang et al Solar noon in 1:00pm for Canada
+  group_by(id, lat, long, yr, mon, day) %>% 
+  summarize(temp = TEMP,
+            rh =   rh,
+            TIME = TIME) %>%
+  ungroup()
+
+## Generate metrics based on previous 24 hrs (noon - 24 hrs)
+for(i in 1:length(fw2_noon$TIME)){
+  j <- as.integer(fw2_noon$TIME[i])  # assign the time to j 
+  fw_subset <- fw_dat %>%            # subset the data to 24 segment
+    filter(intTime <= j,
+           intTime > j - (24 * 60 *60))      # noon minus 24 hrs 
+  
+  ## Polulate the 24 hr values 
+  fw2_noon$ws[i]   <- mean(fw_subset$ws)
+  fw2_noon$prec[i] <- sum(fw_subset$RAIN)
+  fw2_noon$tmax[i]   <- max(fw_subset$TEMP)
+}
+  
+
+fw2_noon <- fw2_noon %>% dplyr::select(-TIME)
+
+write.csv(fw2_noon, "rawData/fwiInput.csv", row.names = FALSE)
+
+
+detach("package:tidyverse", unload = TRUE)
+# detach("package:lubridate", unload = TRUE)
+
+# z <- ls()
+# z <- z[3:8]
+# # rm(list = z); rm(z)
+```
+
+
+
+```{r, include=FALSE}
+## Copied from cffdrs R:documentation 
+#Example of a customised function to calculate fwi and 
+#overwinter DC. This could be further modified by 
+#users with various needs.
+fwi_fs_wDC <- function(input){
+  input <- as.data.frame(fw2_noon)  ### FOR TESTING ---------------------------------------------
+  all.fwi <- NULL
+  curYr.fwi <- NULL
+  #Create date variable
+  input$date <- as.Date(as.POSIXlt(paste(input$yr, "-", input$mon, "-", input$day,sep="")))
+  
+  #use default fire season start and end temperature thresholds
+  fs <- fireSeason(input, fs.start = fsSTART, multi.year = FALSE)  ## CC HACK FOR TESTING default is 12---------------------------------
+        ## CC: Note fireseason returns only the start and end dates (if there is an end date)
+        ##     the remaining script needs adjustments to add the following dates 
+  
+  
+  
+  ## Added by CC to accomodate live data ------------------------------------
+  ## If the data is live data -- That is there is no fs end data detected:
+  ## the end data is the last day of data 
+  if(nrow(fs == 1)){
+    lastDay <- input[nrow(input),c(4:6)]
+    
+    
+    lastDay$fsdatetype <- "end"
+    lastDay$date <- input[nrow(input), c(12)]
+
+    fs <- rbind(fs, lastDay)
+    }
+  
+  
+  
+  #Fire season dates, ordered chronologically
+  fs <- with(fs,fs[order(yr,mon,day),])
+  
+  #Create same Date format as weather dataset for comparison
+  fs$date <- as.Date(as.POSIXlt(paste(fs$yr,"-",fs$mon,"-",fs$day,sep="")))
+
+  theyears <- unique(fs$yr)
+  
+  for(curYr.row in 1:length(theyears)){
+    # curYr.row <- 1 #### TESTING Recomment this -------------------------
+    
+    curYr <- theyears[curYr.row]
+    curYr.d <- fs[fs$yr==curYr,]   ###### 
+    curYr.init <- data.frame(ffmc=80,dmc=10,dc=16) #set an initial startup values
+    
+    #if there is more than one year of data, accumulate precipitation, then calculate overwinterDC
+    #and continue
+    if(curYr.row > 1){
+      #calculate the overwinter period
+      #end of last year's fire season
+      curYr.owd <- curYr.fsd[nrow(curYr.fsd),]
+      #rbind with beginning of current year's fire season
+      curYr.owd <- rbind(curYr.owd, curYr.d[1,])
+      
+      #accumulate precipitation for the period between end of last and start of current
+      curYr.owdata <- sum(input[(input$date>curYr.owd[1,"date"] & 
+                          input$date < curYr.owd[2,"date"]),]$prec)
+      owDC <- wDC(DCf=tail(curYr.fwi$DC,n=1),rw=curYr.owdata) #calculate overwinter DC value
+      curYr.init <- data.frame(ffmc=80,dmc=10,dc=owDC) #Initialize moisture codes
+    }    
+    
+    curYr.fsd <- curYr.d[c(1,nrow(curYr.d)),]#get first and last dates of this year
+    ### cc: line above this is based on the fire season ... not live data ..
+    #match input data to those dates for fire season data
+    curYr.fsdata <- input[input$yr == curYr & input$date >= curYr.fsd[1,"date"] &
+                          input$date <= curYr.fsd[2,"date"],]
+    
+    #run fwi on fireseason data
+    curYr.fwi <- fwi(curYr.fsdata,init=curYr.init)
+    #force column names to be uppercase for consistency
+    names(curYr.fwi) <- toupper(names(curYr.fwi))
+    all.fwi <- rbind(all.fwi,curYr.fwi)
+  }
+  all.fwi
+}
+```
+
+
+```{r, include=FALSE}
+# Call FWI 
+
+# data("test_wDC")  ## load test data 
+dat <- read.csv("rawData/fwiInput.csv", stringsAsFactors = FALSE)
+
+## Call the FWI Function 
+dat.fwi <- fwi_fs_wDC(dat)
+```
+
+
+
+
+```{r}
+#### clean-up & detach the packages
+
+# detach("package:tidyverse", unload = TRUE) -- not needed previously detached.
+detach("package:cffdrs", unload = TRUE)
+
+rm(list = (c("dat", "fwi_fs_wDC")))
+```
+
+
+```{r, include=FALSE}
+## Re-load needed libraries 
+library(tidyverse)
+library(lubridate)
+
+```
+
+
+```{r, include=FALSE}
+
+## J. Morris set up a google doc folder for the data.  On my machine this is available at: 
+## G:\My Drive\ALRF_DATA\ALRF_autodata.dat
+## JM also provided a table defining the output columns
+
+## Data Import 
+  # Names are in the second row 
+  hNames <- scan(dataFile, what = character(), sep = ",",
+            skip = 1, nlines = 1)
+  raw <- read.table(dataFile, header = FALSE, 
+                  sep = ",", skip = 4 )
+  names(raw) <- hNames 
+  rm(hNames)  ## Var Not needed 
+  
+  ## Converting the 
+  dat <- as_tibble(raw) %>%
+    mutate(TIMESTAMP = as.POSIXct(TIMESTAMP),       # Converts Time from a Factor to a time value 
+           Rain_mm_Tot = Rain_mm_Tot *.1,
+           WS_ms_Std   = (WS_ms_Std^2 / 15)^.5 * 1.96,
+           Month = format(TIMESTAMP, "%B"),
+           MonthNo = format(TIMESTAMP, "%m"),
+           Day = format(TIMESTAMP, "%d"),
+           Hr24  = as.integer(format(TIMESTAMP, "%H")),
+           AM_PM  = ifelse(Hr24 >= 12, "PM", "AM"),
+           Hr  = ifelse(Hr24 >  12, Hr24 - 12, Hr24),
+           Hr  = if_else(Hr == 0, 12, Hr),
+           Min = as.integer(format(TIMESTAMP, "%M")),
+           HrMin = paste(Hr, ":", Min, AM_PM, sep = "")) %>%   # Convert to +- 95% Confidence interval (15 samples = 15 mins )  
+    rename(Time = TIMESTAMP,
+           AirTemp = AirTC_Avg,
+           Rain_mm = Rain_mm_Tot,
+           Wind_spd = WS_ms_Avg,
+           Wind_CI = WS_ms_Std,
+           Wind_dir = WindDir,
+           Soil_water = VW) %>%
+    dplyr::select(Time, MonthNo, Month, Day, Hr24, Min, AM_PM, HrMin, AirTemp, RH, Rain_mm, Wind_spd, Wind_CI, Wind_dir, SnowDepth, BP_mbar )
+  # view(head(dat2))
+``` 
+  
+```{r}
+  ## Last report String
+  # stamp(" Jan 1, 1999 3:34 pm", locale = Sys.getlocale("LC_TIME"))
+  # Used stamp above to figure out the best 'format()' call below
+  LR <- dat %>% 
+    filter(Time == max(Time)) %>%
+    dplyr::select(Time) %>%
+    unlist() %>% 
+    as_datetime() %>%
+    with_tz(tzone = "Canada/Pacific") %>%
+    format("%b %d, %Y %I:%M %p")
+    # sf()
+ 
+    
+```
+
+<!-- # Defining Functions -->
+<!-- Here I need to standardize the clock.  For example daytime will be run from 6:00am to 6:00pm and a 24 hr day will be 6:00am - 24hrs.  The functions defined below will be used to calculate time intervals  -->
+```{r}
+## Time Functions 
+## Adapted from: https://www.r-bloggers.com/how-to-calculate-with-dates-and-hours-in-r/
+## When calculating time everything is a function of seconds
+  day24 <-  function(u) {
+   x <- u * 86400
+   return(x)
+  }
+  
+  hrs <- function(u) {
+   x <- u * 3600
+   return(x)
+  }
+  
+  mns <- function(m) {
+   x <- m * 60
+   return(x)
+  }
+  
+## Need a function to trim back to the most recent 6:00am ... 
+  # ~~ PUT IT HERE ~~
+  
+## Function to Classify rain 
+  # ~~ PUT IT HERE ~~
+  
+## Function to Classify Wind 
+  # ~~ PUT IT HERE ~~
+
+```
+
+
+
+```{r}
+recent <- dat %>% 
+  filter(Time >= max(Time) - hrs(1)) %>%
+  summarize(LastTime  = max(Time),
+            Tempurature                  = round(AirTemp[Time == max(Time)], 1), 
+            # `Max Tempurature`            = round(max(AirTemp), 1),
+            Rain                         = ifelse(sum(Rain_mm > 5), "Raining", "No Rain"),#,   ## Replace or add Classify fn
+            `RH %`                       = round(mean(RH),1),
+            `Average Wind Speed (m/s)`   = signif(mean(Wind_spd),2),
+            `Wind Gusting to`            = round(`Average Wind Speed (m/s)` + max(Wind_CI),1),
+            `Wind Direction (degrees)`   = as.integer(mean(Wind_dir)))
+  
+```
+
+_Station Data Recieved:_
+
+# <span style="color:blue">`r LR`</span>
+
+
+## Fire Weather Indices (FWI)
+
+The previous five days FWI metrics
+
+
+
+```{r}
+### Print the last 5 days of fwi
+if(nrow(dat.fwi) > 5){
+kable(dat.fwi[(nrow(dat.fwi)-4):nrow(dat.fwi),] %>% dplyr::select(12:19) %>%
+        arrange(desc(DATE)) %>% mutate_at(2:8, funs(round(., 2))) , row.names = FALSE)
+} else {
+  kable(dat.fwi %>% dplyr::select(12:19) %>%
+        arrange(desc(DATE)) %>% mutate_at(2:8, funs(round(., 2))) , row.names = FALSE)
+}
+```
+
+<span style = "font-size: 10pt">Calculation of the FWI are made using the ALRF weather station data and the Canadian Forest Service's `cffdrs R package` as described by Wang et al. (<a href="#Wang">2017</a>). _For a background on Fire Weather Index <a href="#FWI-Backgroud">see below</a>_</span>
+
+
+### Fuel Moisture and Fire Behavior Indices: Recent
+```{r FMIfbiPlots, fig.height = 4, fig.width=10, fig.align = "center"}
+## set up for 2 figures 
+
+
+### Graphing below will be based on last ten days (or all data)
+if(nrow(dat.fwi) < 10){
+  fwi10 <- dat.fwi} else {
+    fwi10 <-dat.fwi[(nrow(dat.fwi)-9):nrow(dat.fwi),]
+  }
+
+fwi10 <- fwi10 %>% 
+  as_tibble() %>%
+  select(12:19) %>%
+  gather(FFMC, DMC, DC, key = "FMC", value = "FMI") %>%
+  gather(ISI, BUI, FWI, key = "FBC", value = "FBI")
+  
+
+
+fmi <- fwi10 %>% ggplot(aes(x = DATE, y = FMI, color = FMC)) +
+  geom_line(size = 1.3) + 
+  coord_cartesian(ylim = c(0,100), expand = 0) + 
+  labs(title = "Fuel Moisture Indicies",
+       x = "",
+       y = "") +
+  theme(legend.position = "bottom",
+        axis.title.x = element_blank())
+
+
+x <- ceiling((max(fwi10$FBI) * 1.05)/10 ) *10  ## set max scale for graph ... ceiling of nearest 10s
+fbi <- fwi10 %>% ggplot(aes(x = DATE, y = FBI, color = FBC)) +
+  geom_line(size = 1.3) + 
+  coord_cartesian(ylim = c(0,x), expand = 0) + 
+  labs(title = "Fire Behaviour Indicies",
+       x = "",
+       y = "") +
+  theme(legend.position = "bottom",
+        axis.title.x = element_blank())
+
+gridExtra::grid.arrange(fmi, fbi, ncol = 2)
+
+  
+```
+
+
+### Fuel Moisture and Fire Behavior Indices: Long Term
+_previous 45 days_
+```{r FMIfbiPlots-longterm, fig.height = 4, fig.width=10, fig.align = "center"}
+## set up for 2 figures 
+
+## Note it appears that the data from the station only records the last 45 days.  
+### Graphing below will be based on last 45 days (or all data)
+if(nrow(dat.fwi) < 60){
+  fwi45 <- dat.fwi} else {
+    fwi45 <-dat.fwi[(nrow(dat.fwi)-9):nrow(dat.fwi),]
+  }
+
+fwi45 <- fwi45 %>% 
+  as_tibble() %>%
+  select(12:19) %>%
+  gather(FFMC, DMC, DC, key = "FMC", value = "FMI") %>%
+  gather(ISI, BUI, FWI, key = "FBC", value = "FBI")
+  
+
+
+fmi <- fwi45 %>% ggplot(aes(x = DATE, y = FMI, color = FMC)) +
+  geom_line(size = 1.3) + 
+  coord_cartesian(ylim = c(0,100), expand = 0) + 
+  labs(title = "Fuel Moisture Indicies",
+       x = "",
+       y = "") +
+  theme(legend.position = "bottom",
+        axis.title.x = element_blank())
+
+
+x <- ceiling((max(fwi45$FBI) * 1.05)/10 ) *10  ## set max scale for graph ... ceiling of nearest 10s
+fbi <- fwi45 %>% ggplot(aes(x = DATE, y = FBI, color = FBC)) +
+  geom_line(size = 1.3) + 
+  coord_cartesian(ylim = c(0,x), expand = 0) + 
+  labs(title = "Fire Behaviour Indicies",
+       x = "",
+       y = "") +
+  theme(legend.position = "bottom",
+        axis.title.x = element_blank())
+
+gridExtra::grid.arrange(fmi, fbi, ncol = 2)
+
+  
+```
+
+
+
+
+
+
+
+------------------------------
+
+## Last known Conditions
+
+Here the last reported hour of data is considered
+```{r}
+## Transpose the data 
+tab1 <- recent %>% 
+  gather(key = var_name, value = value, 2:ncol(recent)) %>% 
+  spread_(key = names(recent)[1],value = 'value') %>%
+  mutate(order = c(5, 3,4,1,7,6)) %>%
+  arrange(order) %>%
+  rename(Measure = var_name) %>%
+  dplyr::select(1:2)
+
+names(tab1) <- c("Measure", LR)
+
+
+kable(tab1, align = "lc")
+```
+
+------------------------------
+
+
+## Overnight conditions 
+```{r}
+LastMidnight <- dat %>% 
+  filter(Hr24 == 0, Min == 0) %>% 
+  filter(Time == max(Time))  %>% 
+  dplyr::select(Time) %>% 
+  unlist()
+
+Overnight <- dat %>% 
+  filter(Time >= LastMidnight - hrs(6)) %>% 
+  filter(Time <  LastMidnight +  hrs(6)) %>% 
+  summarise(`Total Rain`              = sum(Rain_mm),
+            `Nightime Low`            = min(AirTemp),
+            `N. Low time`             = HrMin[AirTemp == `Nightime Low`],
+            `Peak Sustained Wind`     = max(Wind_spd),
+            `P. Wind Direction`       = max(Wind_dir[Wind_spd == max(Wind_spd)])
+            ) %>%
+  mutate(`Nightime Low` = round(`Nightime Low`, 1),
+         `P. Wind Time` = dat$HrMin[dat$Wind_spd == max(dat$Wind_spd)])
+
+
+
+tab2 <- Overnight %>% 
+  gather(key = var_name, value = value, 1:ncol(Overnight)) # %>% 
+  # spread(key = names(Overnight)[1],value = 'value') %>% 
+  # mutate(order = c(1, 2, 3, 4, 5, 3)) %>%
+  # arrange(order) %>%
+  # dplyr::select(1:2)
+
+names(tab2) = c("Measure", "Last Night")
+  
+
+
+kable(tab2, align = "lc")
+                                 
+
+```
+
+
+------------------------------
+
+
+## Conditions: Last Ten Days
+Based on hourly averages.  
+
+
+
+_Note: if data shows as less than one week that means there is less than a week's worth of data available_
+```{r}
+week <- dat %>%
+  filter(Time < LastMidnight,
+         Time >= LastMidnight - day24(10)) %>%
+  group_by(MonthNo, Day, Hr24 ) %>% 
+  summarize(Time = mean(Time),
+            AirTemp = mean(AirTemp),
+            Rain = sum(Rain_mm),
+            RH = mean(RH),
+            BP = mean(BP_mbar))
+            
+```
+
+Total reported rainfall in the last 10 days: **`r sum(week$Rain)`mm.**
+
+```{r WkTemps, fig.align="center"}
+week %>% ggplot(aes(x = Time, y = AirTemp)) + 
+  geom_line(color = rgb(1,.75,.5)) +
+  geom_point(size = 1, color = rgb(.8,.4,.1)) + 
+  geom_smooth(method = "lm", se = FALSE, color = (rgb(.5,0,0))) +
+  # scale_x_reverse()  ## to reverse the scale I should extract a differ datecode. 
+  labs(title = "Tempurature Trend",
+       subtitle = "points are hourly averages")
+
+```
+
+
+### Rainfall 
+```{r, WkRain, fig.align = "center"}
+
+
+week_rain <- week %>% group_by(MonthNo, Day) %>% 
+  summarise(Rain = sum(Rain))
+
+week_rain %>% ggplot(aes(paste(MonthNo, Day, sep = "/"), Rain)) +
+  geom_col() + 
+  coord_cartesian(ylim = c(0,ceiling(week_rain$Rain)), expand = 0) + 
+  labs(title = "Rainfall (mm)",
+       x = "")
+
+  
+  
+```
+
+
+### Rainfall: Long Term
+```{r, Rain-lt, fig.align = "center"}
+lt <- dat %>%
+  filter(Time < LastMidnight,
+         Time >= LastMidnight - day24(60)) %>%
+  group_by(MonthNo, Day, Hr24 ) %>% 
+  summarize(Time = mean(Time),
+            AirTemp = mean(AirTemp),
+            Rain = sum(Rain_mm),
+            RH = mean(RH),
+            BP = mean(BP_mbar))
+
+
+
+lt_rain <- lt %>% group_by(MonthNo, Day) %>% 
+  summarise(Rain = sum(Rain))
+
+lt_rain %>% ggplot(aes(paste(MonthNo, Day, sep = "/"), Rain)) +
+  geom_col() + 
+  coord_cartesian(ylim = c(0,ceiling(max(lt_rain$Rain))), expand = 0) + 
+  labs(title = "Rainfall (mm)",
+       subtitle = "Previous 45 days",
+       x = "")
+
+  
+  
+```
+
+
+### Relative Humidity 
+```{r, wkRH, fig.align="center"}
+week %>% ggplot(aes(Time, RH)) +
+  geom_line(color = rgb(0.5,0.75,1)) + 
+  geom_point(color = rgb(0,.25,1)) + 
+  geom_smooth(method = "lm", se = FALSE) + 
+  coord_cartesian(ylim = c(0,100), expand = 0) + 
+  labs(title = "RH %")
+  
+```
+
+### Barometric Pressure 
+```{r, wkBarometric, fig.align="center"}
+
+x <- ceiling((max(week$BP) * 1.05)/10 ) *10  ## set max scale for graph ... ceiling of nearest 10s
+
+week %>% ggplot(aes(Time, BP)) +
+  geom_point(color = "orange") + 
+  geom_smooth(method = "lm",color = "red", se = FALSE) + 
+  coord_cartesian(ylim = c(400,x), expand = 0) + 
+  labs(title = "Barometrics Pressure (mbar)",
+       subtitle = expression(italic("Not corrected to sea-level")))
+  
+```
+
+
+--------------------------
+
+
+## Background: Fire Weather Indicies <a NAME ="FWI-Backgroud"></a>
+
+The following indicies are based on the [Canadian Forest Sevice Methiods](http://cwfis.cfs.nrcan.gc.ca/background/dsm/fwi)
+
+> ### Structure of the FWI System
+>
+>The diagram below illustrates the components of the FWI System. Calculation of the components is based on consecutive daily observations of temperature, relative humidity, wind speed, and 24-hour rainfall. The six standard components provide numeric ratings of relative potential for wildland fire. 
+> ![Fire Weather structure](http://cwfis.cfs.nrcan.gc.ca/images/fwi_structure.gif)
+>
+> --- [Canadian Forest Service](http://cwfis.cfs.nrcan.gc.ca/background/summary/fwi)
+
+
+-----------------------------
+
+# References 
+
+<a name = "Wang"></a>
+Wang X, Wotton BM, Cantin AS, Parisien M-A, Anderson K, Moore B, et al. cffdrs: an R package for the Canadian Forest Fire Danger Rating System. Ecol Process [Internet]. 2017 Dec [cited 2019 May 3];6(1):5. Available from:  http://ecologicalprocesses.springeropen.com/articles/10.1186/s13717-017-0070-z
+
+

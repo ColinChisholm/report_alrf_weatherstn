@@ -34,6 +34,17 @@ vignettes/*.pdf
 # Temporary files created by R markdown
 *.utf8.md
 *.knit.md
+*.tex
 
 # R Environment Variables
 .Renviron
+
+
+# Rmarkdown reports 
+*.html
+*.pdf
+
+
+# Colin's additions 
+rawData/
+dev/
