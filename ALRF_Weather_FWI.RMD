@@ -20,7 +20,7 @@ editor_options:
 
 ```{r, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warnings = FALSE, message = FALSE)
-options(warn = 1)
+# options(warn = 1)
 ```
 
 
@@ -59,7 +59,7 @@ library(lubridate)
   
 ## Import the .dat file from the weather station 
 # dataFile <- "G:\\My Drive\\ALRF_DATA\\ALRF_autodata.dat"
-  dataFile <- "./rawData/ALRF_autodata.dat"
+dataFile <- "G:\\ResearchLogNet\\CAMnet\\Stations & Data\\Prince George Area\\Aleza Lake\\ALRF_Daily_Auto.dat"
 
 readWeather <- function(){
   
@@ -78,7 +78,8 @@ fw_dat <- raw %>% as_tibble() %>%
   mutate(id = 1,
          lat = 54.086, 
          long = 122.076,
-         TIME = as.POSIXct(TIMESTAMP),
+         # TIME = as.POSIXct(TIMESTAMP),
+         TIME = ymd_hms(TIMESTAMP),
          intTime = as.integer(TIME),
          yr   = year(TIME),
          mon  = month(TIME),
@@ -260,7 +261,7 @@ library(lubridate)
   
   ## Converting the 
   dat <- as_tibble(raw) %>%
-    mutate(TIMESTAMP = as.POSIXct(TIMESTAMP),       # Converts Time from a Factor to a time value 
+    mutate(TIMESTAMP = lubridate::ymd_hms(TIMESTAMP),       # Converts Time from a Factor to a time value 
            Rain_mm_Tot = Rain_mm_Tot *.1,
            WS_ms_Std   = (WS_ms_Std^2 / 15)^.5 * 1.96,
            Month = format(TIMESTAMP, "%B"),
@@ -269,7 +270,7 @@ library(lubridate)
            Hr24  = as.integer(format(TIMESTAMP, "%H")),
            AM_PM  = ifelse(Hr24 >= 12, "PM", "AM"),
            Hr  = ifelse(Hr24 >  12, Hr24 - 12, Hr24),
-           Hr  = if_else(Hr == 0, 12, Hr),
+           Hr  = ifelse(Hr == 0, 12, Hr),
            Min = as.integer(format(TIMESTAMP, "%M")),
            HrMin = paste(Hr, ":", Min, AM_PM, sep = "")) %>%   # Convert to +- 95% Confidence interval (15 samples = 15 mins )  
     rename(Time = TIMESTAMP,
@@ -360,12 +361,17 @@ The previous five days FWI metrics
 
 ```{r}
 ### Print the last 5 days of fwi
+dat.fwi <- as_tibble(dat.fwi)
+
 if(nrow(dat.fwi) > 5){
 kable(dat.fwi[(nrow(dat.fwi)-4):nrow(dat.fwi),] %>% dplyr::select(12:19) %>%
-        arrange(desc(DATE)) %>% mutate_at(2:8, funs(round(., 2))) , row.names = FALSE)
+        arrange(desc(DATE)) %>% 
+        mutate(across(.cols = 2:8, round, 2))
+      )
 } else {
   kable(dat.fwi %>% dplyr::select(12:19) %>%
-        arrange(desc(DATE)) %>% mutate_at(2:8, funs(round(., 2))) , row.names = FALSE)
+        arrange(desc(DATE)) %>% mutate(across(.cols = 2:8, round, 2))
+        )
 }
 ```
 
@@ -572,11 +578,18 @@ week %>% ggplot(aes(x = Time, y = AirTemp)) +
 
 
 week_rain <- week %>% group_by(MonthNo, Day) %>% 
-  summarise(Rain = sum(Rain))
+  summarise(Rain = sum(Rain)) %>% ungroup()
+  
+week_rain <- week_rain %>% 
+  mutate(mmdd = paste(MonthNo, Day, sep = "/"))
 
-week_rain %>% ggplot(aes(paste(MonthNo, Day, sep = "/"), Rain)) +
+
+# week_rain
+
+
+week_rain %>% ggplot(aes(x = mmdd, y = Rain)) +
   geom_col() + 
-  coord_cartesian(ylim = c(0,ceiling(week_rain$Rain)), expand = 0) + 
+  # coord_cartesian(ylim = c(0,ceiling(week_rain$Rain)+.1), expand = 0) + 
   labs(title = "Rainfall (mm)",
        x = "")
 
